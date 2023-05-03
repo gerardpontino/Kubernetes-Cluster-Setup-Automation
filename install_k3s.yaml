@@ -1,0 +1,86 @@
+---
+  - name: Check cgroup configuration on all nodes
+    hosts: all
+    gather_facts: true
+
+    tasks:
+      - name: Check if cgroup config is existing or not
+        shell: grep -o "cgroup_memory=1 cgroup_enable=memory" /boot/cmdline.txt
+        register: out
+        failed_when: false
+        changed_when: false
+
+      - name: Execute if not existing
+        shell: |
+                cp /boot/cmdline.txt /boot/cmdline.txt.backup.%date
+                sed -i 's/$/ cgroup_memory=1 cgroup_enable=memory/g' /boot/cmdline.txt 
+                sleep 5 && shutdown -r now "Ansible Rebooting after cgroup configuration"
+        when: "'cgroup_memory=1 cgroup_enable=memory' not in out.stdout"
+        async: 0
+        poll: 0
+        ignore_unreachable: true
+        become: true
+        become_method: sudo
+      
+      - name: Waiting for server to come back
+        wait_for_connection:
+          delay: 5
+
+  - name: Master Node Configuration
+    hosts: masternode
+    gather_facts: no
+    
+    tasks: 
+      - name: Check if 10250 is Opened 
+        wait_for:
+          port: 10250
+          delay: 5
+          timeout: 10
+          msg: "10250 is not open"
+        register: port_check
+        ignore_errors: yes
+
+      - name: Open port 10250 in iptables
+        shell: iptables -A INPUT -p tcp --dport 10250 -j ACCEPT
+        when: port_check.failed == true
+        become: true
+        become_method: sudo
+
+      - name: Print message if 10250 is Already Opened 
+        debug:
+          msg: "10250 is already Opened"
+        when: port_check.failed == false
+
+      - name: Install k3s in Master Node
+        shell: |
+                curl -sfL https://get.k3s.io | sh -
+                kubectl get nodes
+        become: true
+        become_method: sudo
+
+  - name: Gather IP and Node Token from Master Node 
+    hosts: masternode
+    gather_facts: no
+
+    tasks:
+      - name: Get the IP of Master Node
+        shell: hostname -I | awk '{print$1}'
+        register: masterIP
+
+      - name: Get the Node Token value from the Master
+        shell: cat /var/lib/rancher/k3s/server/node-token
+        become: true
+        become_method: sudo
+        register: nodeToken
+      
+      - name: Add to a dummy host
+        add_host:
+          name: "K3s_MASTER_DETAILS"
+          masterip: "{{ masterIP.stdout }}"
+          nodetoken: "{{ nodeToken.stdout }}"
+      
+  - name: Install K3s in Worker nodes
+    hosts: workers
+    tasks: 
+      - name: Installing K3s agents
+        shell: curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars['K3s_MASTER_DETAILS']['masterip'] }}:6443 K3S_TOKEN={{ hostvars['K3s_MASTER_DETAILS']['nodetoken'] }} sh -

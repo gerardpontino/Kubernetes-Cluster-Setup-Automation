@@ -1,0 +1,6 @@
+[masternode]
+k3s-master
+
+[workers]
+worker01
+worker02
